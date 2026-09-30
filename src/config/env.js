@@ -90,13 +90,17 @@ export function assertProductionConfig() {
   const problems = [];
   for (const k of ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'ENCRYPTION_KEY']) {
     const v = env[k];
-    if (DEV_DEFAULTS.some((d) => v.startsWith(d))) problems.push(`${k} is still the development default`);
+    const raw = process.env[k];
+    if (raw === undefined) problems.push(`${k} is NOT SET on this service (variable missing in this environment)`);
+    else if (String(raw).trim() === '') problems.push(`${k} is set but EMPTY (fill in a value in the hosting variables)`);
+    else if (DEV_DEFAULTS.some((d) => v.startsWith(d))) problems.push(`${k} is still the development default`);
     else if (v.length < 32) problems.push(`${k} must be at least 32 characters`);
   }
   if (env.ENABLE_MOCK_DATA) problems.push('ENABLE_MOCK_DATA must be false in production');
   if (env.ALLOW_UNSIGNED_WEBHOOKS) problems.push('ALLOW_UNSIGNED_WEBHOOKS must be false in production');
   if (problems.length) {
     console.error('Refusing to start in production:\n - ' + problems.join('\n - '));
+    console.error(`Variables this container can see: ${Object.keys(process.env).filter((k) => /^(NODE_ENV|PORT|MONGODB_URI|CLIENT_URL|PUBLIC_API_URL|JWT_SECRET|JWT_REFRESH_SECRET|ENCRYPTION_KEY|RAILWAY_.*)$/.test(k)).sort().join(', ')}`);
     process.exit(1);
   }
 }
