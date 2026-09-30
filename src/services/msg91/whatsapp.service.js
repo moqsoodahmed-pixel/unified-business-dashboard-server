@@ -4,7 +4,7 @@ import { findOrCreateCustomer, touchCustomer, displayName } from '../customer.se
 import { emitEvent } from '../event.bus.js';
 import { emitToPermission } from '../socket.js';
 import { getSection } from '../settings.service.js';
-import { requireCredentials } from '../integration.credentials.js';
+import { resolveAccount } from '../integration.credentials.js';
 import { normalizePhone } from '../../utils/phone.js';
 import { redactDeep } from '../../utils/redact.js';
 import { ApiError } from '../../utils/ApiError.js';
@@ -37,7 +37,7 @@ async function ensureContact(phone, customer, profileName) {
 
 /* ------------------------------ inbound ------------------------------ */
 
-export async function handleInbound(n) {
+export async function handleInbound(n, account = 'msg91') {
   if (!n.phone) throw new Error('Inbound message has no valid customer number');
   if (n.providerMessageId) {
     const dup = await WhatsAppMessage.findOne({ providerMessageId: n.providerMessageId }).select('_id');
@@ -52,7 +52,7 @@ export async function handleInbound(n) {
   let message;
   try {
     message = await WhatsAppMessage.create({
-      conversationId: conv._id, customerId: customer?._id, phone: n.phone, direction: 'in', type: n.type, text: n.text,
+      conversationId: conv._id, customerId: customer?._id, phone: n.phone, account, direction: 'in', type: n.type, text: n.text,
       media: n.media, providerMessageId: n.providerMessageId, providerRequestId: n.requestId, status: 'received',
       statusHistory: [{ status: 'received', at }], providerTimestamp: at,
     });
@@ -66,7 +66,7 @@ export async function handleInbound(n) {
     {
       $inc: { unreadCount: 1, messageCount: 1 },
       $set: {
-        lastMessageAt: at, lastMessagePreview: preview(message), lastMessageDirection: 'in', lastInboundAt: at, markedUnread: false,
+        lastMessageAt: at, lastMessagePreview: preview(message), lastMessageDirection: 'in', lastInboundAt: at, markedUnread: false, account,
         ...(conv.customerId ? { customerId: conv.customerId } : {}),
         ...(['resolved', 'archived'].includes(conv.status) ? { status: 'open' } : {}),
       },
@@ -153,9 +153,9 @@ export async function handleStatus(n) {
 }
 
 /** Processor used by the webhook route and by retries. Accepts one payload object. */
-export async function processMsg91Item(payload) {
+export async function processMsg91Item(payload, account = 'msg91') {
   const n = normalizeMsg91(payload);
-  if (n.kind === 'inbound') return handleInbound(n);
+  if (n.kind === 'inbound') return handleInbound(n, account);
   if (n.kind === 'status') return handleStatus(n);
   return { ignored: true, result: 'unsupported event' };
 }
@@ -190,8 +190,11 @@ export async function resolveConversationForSend({ conversationId, phone, custom
  * The message row is written first (status queued) so a provider outage never loses what the operator typed.
  */
 export async function sendMessage(input, user) {
-  const creds = await requireCredentials('msg91');
   const conv = await resolveConversationForSend(input, user);
+  // An explicitly chosen number must work; otherwise reply from the number the customer wrote to, else the default.
+  const { key: account, creds } = input.account
+    ? await resolveAccount('msg91', input.account)
+    : await resolveAccount('msg91', conv.account, { strict: false });
   const type = input.type || 'text';
 
   if (type !== 'template' && !insideSessionWindow(conv)) {
@@ -208,7 +211,7 @@ export async function sendMessage(input, user) {
   const variables = (input.template?.variables || []).map(String);
 
   const message = await WhatsAppMessage.create({
-    conversationId: conv._id, customerId: conv.customerId, phone: conv.phone, direction: 'out', type,
+    conversationId: conv._id, customerId: conv.customerId, phone: conv.phone, account, direction: 'out', type,
     text: type === 'text' ? input.text : type === 'template' ? (templateDef?.bodyText ? templateDef.bodyText.replace(/\{\{(\d+)\}\}/g, (_, i) => variables[i - 1] ?? '') : `Template: ${tName}`) : input.media?.caption || '',
     media: ['image', 'video', 'audio', 'document'].includes(type) ? input.media : undefined,
     template: type === 'template' ? { name: tName, language: tLang, variables } : undefined,
@@ -217,9 +220,9 @@ export async function sendMessage(input, user) {
 
   try {
     let res;
-    if (type === 'text') res = await client.sendText({ to: conv.phone, text: input.text }, creds);
-    else if (type === 'template') res = await client.sendTemplate({ to: conv.phone, name: tName, language: tLang, namespace: templateDef?.namespace, variables }, creds);
-    else res = await client.sendMedia({ to: conv.phone, type, link: input.media.url, caption: input.media.caption, filename: input.media.filename }, creds);
+    if (type === 'text') res = await client.sendText({ to: conv.phone, text: input.text }, creds, account);
+    else if (type === 'template') res = await client.sendTemplate({ to: conv.phone, name: tName, language: tLang, namespace: templateDef?.namespace, variables }, creds, account);
+    else res = await client.sendMedia({ to: conv.phone, type, link: input.media.url, caption: input.media.caption, filename: input.media.filename }, creds, account);
 
     message.status = 'sent';
     message.sentAt = new Date();

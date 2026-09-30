@@ -27,6 +27,7 @@ const schema = new mongoose.Schema(
     failedAt: Date,
     lastEventAt: Date,
     verifiedByClient: { type: Boolean, default: false }, // signature verified via /verify endpoint
+    account: String, // key of the Razorpay account the payment belongs to
   },
   { timestamps: true }
 );

@@ -35,6 +35,7 @@ export const tagsBody = z.object({ tags: z.array(str(40).min(1)).min(1).max(20) 
 const media = z.object({ url: z.string().url().max(2000), caption: str(1000).optional(), filename: str(200).optional() });
 export const waSend = z.object({
   conversationId: oid.optional(), customerId: oid.optional(), phone: str(30).optional(),
+  account: z.string().regex(/^msg91(_[a-z0-9]{4,16})?$/).optional(), // which WhatsApp number sends it (default: the number the customer wrote to)
   type: z.enum(['text', 'template', 'image', 'video', 'audio', 'document']).default('text'),
   text: str(4096).optional(), media: media.optional(), templateId: oid.optional(),
   template: z.object({ name: str(200), language: str(20).optional(), variables: z.array(z.union([z.string(), z.number()])).max(30).optional() }).optional(),
@@ -60,7 +61,7 @@ export const emailSend = z.object({
   subject: str(300).optional(), htmlContent: z.string().max(500_000).optional(), textContent: z.string().max(200_000).optional(),
   templateId: oid.optional(), variables: z.record(z.union([z.string(), z.number()])).optional(), customerId: oid.optional(),
   senderEmail: z.string().email().optional(), senderName: str(120).optional(),
-  account: z.enum(['auto', '1', '2']).optional(), // which Brevo account sends this email
+  account: z.string().regex(/^(auto|1|2|brevo2?|brevo_[a-z0-9]{4,16})$/).optional(), // which Brevo account sends this email
   attachments: z.array(z.object({ name: str(200).min(1), contentBase64: z.string().min(1).max(10_000_000) })).max(5).optional(),
 }).strict().superRefine((v, ctx) => {
   if (!v.templateId && !v.subject) ctx.addIssue({ code: 'custom', message: 'Subject is required', path: ['subject'] });
@@ -76,19 +77,28 @@ export const emailContactPatch = z.object({ name: str(120), subscribed: z.boolea
 export const orderCreate = z.object({
   amount: z.number().positive().max(10_000_000), currency: z.string().length(3).optional(), receipt: str(40).optional(), description: str(250).optional(),
   customerId: oid.optional(), customer: z.object({ firstName: str(80).optional(), lastName: str(80).optional(), name: str(160).optional(), phone: str(30).optional(), email: str(200).optional() }).optional(),
+  account: z.string().regex(/^razorpay(_[a-z0-9]{4,16})?$/).optional(), // which Razorpay account creates the order
   notes: z.record(z.union([z.string(), z.number()])).optional(),
 }).strict();
 export const paymentVerify = z.object({ orderId: str(60).min(1), paymentId: str(60).min(1), signature: str(200).min(1) }).strict();
 export const refundBody = z.object({ amount: z.number().positive().optional(), reason: str(200).optional(), speed: z.enum(['normal', 'optimum']).optional() }).strict();
 
 /* telegram */
-export const routeCreate = z.object({ name: str(80).min(1), chatId: str(64).min(1), eventTypes: z.array(str(60)).min(1).max(60), enabled: z.boolean().optional(), description: str(300).optional() }).strict();
+export const routeCreate = z.object({
+  name: str(80).min(1), chatId: str(64).min(1), eventTypes: z.array(str(60)).min(1).max(60), enabled: z.boolean().optional(), description: str(300).optional(),
+  account: z.string().regex(/^telegram(_[a-z0-9]{4,16})?$/).nullable().optional(), // which bot sends to this chat (null = default bot)
+}).strict();
 export const routePatch = routeCreate.partial().strict();
 export const togglesBody = z.record(z.boolean());
 
 /* integrations */
 export const integrationSave = z.object({ values: z.record(z.union([z.string(), z.number(), z.null()])).default({}), clear: z.array(str(60)).optional(), force: z.boolean().optional() }).strict();
-export const providerParam = z.object({ provider: z.enum(['msg91', 'brevo', 'brevo2', 'razorpay', 'telegram', 'mongodb', 'system']) });
+export const providerParam = z.object({ provider: z.string().regex(/^(mongodb|system|msg91|brevo|brevo2|razorpay|telegram|(msg91|brevo|razorpay|telegram)_[a-z0-9]{4,16})$/, 'Unknown integration') });
+export const accountCreate = z.object({
+  type: z.enum(['msg91', 'brevo', 'razorpay', 'telegram']), label: str(80).optional(),
+  values: z.record(z.union([z.string(), z.number(), z.null()])).default({}), force: z.boolean().optional(),
+}).strict();
+export const accountPatch = z.object({ label: z.string().max(80).optional(), isDefault: z.boolean().optional() }).strict();
 
 /* settings */
 export const sectionParam = z.object({ section: z.enum(['general', 'whatsapp', 'email', 'payments', 'telegram', 'security']) });

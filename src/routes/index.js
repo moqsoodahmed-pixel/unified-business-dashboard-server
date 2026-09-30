@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler as h } from '../utils/asyncHandler.js';
 import { authenticate } from '../middleware/auth.js';
-import { requirePermission as need, superAdminOnly } from '../middleware/rbac.js';
+import { requirePermission as need, requireAnyPermission as needAny, superAdminOnly } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
 import { loginLimiter } from '../middleware/rateLimit.js';
 import * as C from '../controllers/index.js';
@@ -126,6 +126,13 @@ export function buildRouter() {
 
   const integrations = Router();
   integrations.get('/', need('integrations:read'), integrationC.list);
+  integrations.get('/types', need('integrations:read'), integrationC.types);
+  // Account pickers: each type is visible to whoever can use that feature (no secrets are returned).
+  const pickerPerm = { msg91: 'whatsapp:write', brevo: 'email:send', razorpay: 'payments:write', telegram: 'telegram:write' };
+  integrations.get('/accounts/:type(msg91|brevo|razorpay|telegram)', (req, res, next) => needAny('integrations:read', pickerPerm[req.params.type])(req, res, next), integrationC.accountOptions);
+  integrations.post('/accounts', need('integrations:write'), validate({ body: V.accountCreate }), integrationC.createAccount);
+  integrations.patch('/:provider', need('integrations:write'), validate({ params: V.providerParam, body: V.accountPatch }), integrationC.updateAccount);
+  integrations.delete('/:provider', need('integrations:write'), validate({ params: V.providerParam }), integrationC.deleteAccount);
   integrations.get('/:provider', need('integrations:read'), validate({ params: V.providerParam }), integrationC.get);
   integrations.put('/:provider', need('integrations:write'), validate({ params: V.providerParam, body: V.integrationSave }), integrationC.save);
   integrations.post('/:provider/test', need('integrations:write'), validate({ params: V.providerParam }), integrationC.test);

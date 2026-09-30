@@ -1,6 +1,7 @@
 import { TelegramRoute, TelegramNotification, TelegramEvent, TelegramBot } from '../../models/index.js';
 import { EVENT_CATALOG, matchesPattern, EVENT_TYPES } from '../../constants/events.js';
-import { getCredentials, getRawCredentials } from '../integration.credentials.js';
+import { getRawCredentials, resolveAccount } from '../integration.credentials.js';
+import { listAccountDefs } from '../../integrations/accounts.js';
 import { isNotificationEnabled, getSection } from '../settings.service.js';
 import { emitEvent } from '../event.bus.js';
 import * as client from './telegram.client.js';
@@ -30,8 +31,14 @@ function validatePatterns(patterns) {
 export async function listRoutes() {
   return TelegramRoute.find().sort({ createdAt: 1 }).lean();
 }
+async function validateBot(account) {
+  if (!account) return;
+  if (!(await listAccountDefs('telegram')).some((a) => a.key === account)) throw ApiError.badRequest('Unknown Telegram bot', 'UNKNOWN_ACCOUNT');
+}
+
 export async function createRoute(input, user) {
   validatePatterns(input.eventTypes);
+  await validateBot(input.account);
   try {
     return await TelegramRoute.create({ ...input, createdBy: user?.id });
   } catch (err) {
@@ -41,6 +48,7 @@ export async function createRoute(input, user) {
 }
 export async function updateRoute(id, patch) {
   if (patch.eventTypes) validatePatterns(patch.eventTypes);
+  await validateBot(patch.account);
   const r = await TelegramRoute.findByIdAndUpdate(id, patch, { new: true });
   if (!r) throw ApiError.notFound('Route not found');
   return r;
@@ -56,12 +64,12 @@ export async function resolveRoutes(eventType) {
   return routes.filter((r) => r.eventTypes.some((p) => matchesPattern(p, eventType)));
 }
 
-async function sendWithRetry(creds, chatId, text) {
+async function sendWithRetry(creds, chatId, text, account = 'telegram') {
   let attempts = 0;
   for (;;) {
     attempts += 1;
     try {
-      const msg = await trackCall('telegram', () => client.sendMessage({ chatId, text }, creds));
+      const msg = await trackCall(account, () => client.sendMessage({ chatId, text }, creds));
       return { message: msg, attempts };
     } catch (err) {
       const wait = err.retryAfter ? Math.min(err.retryAfter, 5) * 1000 : err.retriable ? 800 : 0;
@@ -72,9 +80,10 @@ async function sendWithRetry(creds, chatId, text) {
   }
 }
 
-async function deliver(route, event, text, creds) {
+async function deliver(route, event, text, bot) {
   try {
-    const { message, attempts } = await sendWithRetry(creds, route.chatId, text);
+    if (!bot) throw Object.assign(new Error('The Telegram bot for this route is not configured'), { attempts: 0 });
+    const { message, attempts } = await sendWithRetry(bot.creds, route.chatId, text, bot.key);
     await TelegramNotification.create({
       routeId: route._id, routeName: route.name, chatId: route.chatId, eventType: event.type, text, status: 'sent',
       telegramMessageId: message?.message_id, attempts, customerId: event.customerId,
@@ -99,24 +108,28 @@ export async function notifyEvent(event) {
   if (!def?.notify) return { sent: 0 };
   if (!(await isNotificationEnabled(event.type))) return { sent: 0, reason: 'disabled' };
 
-  const creds = await getCredentials('telegram');
-  if (!creds) {
-    await TelegramEvent.create({ eventType: event.type, outcome: 'not_configured', summary: 'Telegram is not configured' });
-    return { sent: 0, reason: 'not_configured' };
-  }
   const routes = await resolveRoutes(event.type);
   if (!routes.length) {
     await TelegramEvent.create({ eventType: event.type, outcome: 'no_route', summary: 'No enabled route matches this event' });
     return { sent: 0, reason: 'no_route' };
   }
+  // Each route may use its own bot; resolve every bot once per event.
+  const bots = new Map();
+  for (const r of routes) {
+    const want = r.account || '';
+    if (!bots.has(want)) bots.set(want, await resolveAccount('telegram', want || undefined, { strict: false }).catch(() => null));
+  }
+  if (![...bots.values()].some(Boolean)) {
+    await TelegramEvent.create({ eventType: event.type, outcome: 'not_configured', summary: 'Telegram is not configured' });
+    return { sent: 0, reason: 'not_configured' };
+  }
   const general = await getSection('general');
   const tg = await getSection('telegram');
-  const { values } = await getRawCredentials('telegram');
   const text = formatEvent(event, {
     dashboardUrl: general.dashboardUrl, timezone: general.timezone, includeLink: tg.includeDashboardLinks,
-    secrets: [values.botToken, env.JWT_SECRET, env.JWT_REFRESH_SECRET, env.ENCRYPTION_KEY],
+    secrets: [...(await allBotTokens()), env.JWT_SECRET, env.JWT_REFRESH_SECRET, env.ENCRYPTION_KEY],
   });
-  const results = await Promise.all(routes.map((r) => deliver(r, event, text, creds)));
+  const results = await Promise.all(routes.map((r) => deliver(r, event, text, bots.get(r.account || ''))));
   const sent = results.filter(Boolean).length;
   await TelegramEvent.create({ eventType: event.type, outcome: 'dispatched', routedCount: routes.length, summary: `${sent}/${routes.length} delivered` });
   return { sent, routes: routes.length };
@@ -125,11 +138,10 @@ export async function notifyEvent(event) {
 export async function sendTestToRoute(id) {
   const route = await TelegramRoute.findById(id);
   if (!route) throw ApiError.notFound('Route not found');
-  const creds = await getCredentials('telegram');
-  if (!creds) throw ApiError.notConfigured('Telegram');
+  const bot = await resolveAccount('telegram', route.account || undefined, { strict: false });
   const text = `🧪 <b>TEST NOTIFICATION</b>\n\nRoute: ${escapeHtml(route.name)}\nThis confirms the dashboard can reach this chat.`;
   try {
-    const { message } = await sendWithRetry(creds, route.chatId, text);
+    const { message } = await sendWithRetry(bot.creds, route.chatId, text, bot.key);
     await TelegramRoute.updateOne({ _id: route._id }, { lastSentAt: new Date(), lastError: null });
     return { ok: true, messageId: message?.message_id };
   } catch (err) {
@@ -138,13 +150,25 @@ export async function sendTestToRoute(id) {
   }
 }
 
-export async function getBotInfo() {
-  return TelegramBot.findOne({ key: 'default' }).lean();
+/** Every bot token, so none of them can ever leak into a formatted message. */
+async function allBotTokens() {
+  const out = [];
+  for (const { key } of await listAccountDefs('telegram')) {
+    const { values } = await getRawCredentials(key);
+    if (values.botToken) out.push(values.botToken);
+  }
+  return out;
+}
+
+export async function getBotInfo(account) {
+  const key = !account || account === 'telegram' ? 'default' : account;
+  return TelegramBot.findOne({ key }).lean();
 }
 
 /** Lets an admin find a chat id: message the bot, then list recent chats it has seen. */
-export async function discoverChats() {
-  const updates = await client.getUpdates();
+export async function discoverChats(account) {
+  const bot = await resolveAccount('telegram', account || undefined);
+  const updates = await client.getUpdates(bot.creds);
   const seen = new Map();
   for (const u of updates || []) {
     const chat = u.message?.chat || u.channel_post?.chat || u.my_chat_member?.chat;

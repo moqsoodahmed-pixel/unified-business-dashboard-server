@@ -1,7 +1,7 @@
 import { ok, created } from '../utils/response.js';
 import { ApiError } from '../utils/ApiError.js';
 import { env, isProd } from '../config/env.js';
-import { PROCESSORS } from '../webhooks/processors.js';
+import { processorFor } from '../webhooks/processors.js';
 import * as auth from '../services/auth.service.js';
 import * as users from '../services/user.service.js';
 import * as dashboard from '../services/dashboard.service.js';
@@ -19,7 +19,7 @@ import * as settings from '../services/settings.service.js';
 import * as health from '../services/health.service.js';
 import * as search from '../services/search.service.js';
 import { EVENT_CATALOG } from '../constants/events.js';
-import { PROVIDERS } from '../integrations/registry.js';
+import { listAccountDefs } from '../integrations/accounts.js';
 import { apiBaseUrl } from '../config/env.js';
 
 const ctxOf = (req) => ({ ip: req.ip, userAgent: req.headers['user-agent'] });
@@ -169,14 +169,19 @@ export const tgC = {
   updateRoute: async (req, res) => ok(res, await tg.updateRoute(req.params.id, req.body)),
   async deleteRoute(req, res) { await tg.deleteRoute(req.params.id); return ok(res, null, 'Route deleted'); },
   testRoute: async (req, res) => ok(res, await tg.sendTestToRoute(req.params.id), 'Test message sent'),
-  bot: async (_req, res) => ok(res, await tg.getBotInfo()),
-  discover: async (_req, res) => ok(res, await tg.discoverChats()),
+  bot: async (req, res) => ok(res, await tg.getBotInfo(typeof req.query.account === 'string' && /^telegram(_[a-z0-9]{4,16})?$/.test(req.query.account) ? req.query.account : undefined)),
+  discover: async (req, res) => ok(res, await tg.discoverChats(typeof req.query.account === 'string' && /^telegram(_[a-z0-9]{4,16})?$/.test(req.query.account) ? req.query.account : undefined)),
   notifications: async (req, res) => ok(res, await tg.listNotifications(req.query)),
 };
 
 /* ---------------- integrations ---------------- */
 export const integrationC = {
   list: async (_req, res) => ok(res, await integrations.listIntegrations()),
+  types: async (_req, res) => ok(res, integrations.listTypes()),
+  accountOptions: async (req, res) => ok(res, await integrations.listAccountOptions(req.params.type)),
+  createAccount: async (req, res) => created(res, await integrations.createAccount(req.body, req.user), 'Account added'),
+  updateAccount: async (req, res) => ok(res, await integrations.updateAccount(req.params.provider, req.body, req.user), 'Account updated'),
+  deleteAccount: async (req, res) => ok(res, await integrations.deleteAccount(req.params.provider, req.user), 'Account removed'),
   get: async (req, res) => ok(res, await integrations.getView(req.params.provider)),
   save: async (req, res) => ok(res, await integrations.saveIntegration(req.params.provider, req.body.values, { clear: req.body.clear, force: req.body.force }, req.user), 'Integration saved'),
   async test(req, res) {
@@ -196,14 +201,14 @@ export const webhookC = {
   get: async (req, res) => ok(res, await webhooks.getWebhookEvent(req.params.id)),
   async retry(req, res) {
     try {
-      const out = await webhooks.retryWebhookEvent(req.params.id, PROCESSORS);
+      const out = await webhooks.retryWebhookEvent(req.params.id, processorFor);
       return ok(res, { status: out.status, duplicate: out.duplicate }, 'Retry executed');
     } catch (err) {
       if (err instanceof ApiError) throw err;
       throw ApiError.unprocessable(`Retry failed: ${err.message}`, 'RETRY_FAILED');
     }
   },
-  endpoints: (_req, res) => ok(res, Object.entries(PROVIDERS).filter(([, p]) => p.webhookPath).map(([key, p]) => ({ provider: key, label: p.label, url: `${apiBaseUrl()}${p.webhookPath}` }))),
+  endpoints: async (_req, res) => ok(res, (await listAccountDefs()).filter((a) => a.webhookPath).map((a) => ({ provider: a.key, type: a.type, label: a.label, url: `${apiBaseUrl()}${a.webhookPath}` }))),
 };
 
 /* ---------------- settings ---------------- */

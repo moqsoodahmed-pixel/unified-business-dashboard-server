@@ -24,18 +24,18 @@ export async function ping(creds) {
   return check(await call(c, '/payments', { query: { count: 1 } }));
 }
 
-export async function createOrder({ amount, currency = 'INR', receipt, notes }, creds) {
-  const c = creds || (await requireCredentials('razorpay'));
-  return trackCall('razorpay', async () => check(await call(c, '/orders', { method: 'POST', body: { amount, currency, receipt, notes } })));
+export async function createOrder({ amount, currency = 'INR', receipt, notes }, creds, account = 'razorpay') {
+  const c = creds || (await requireCredentials(account));
+  return trackCall(account, async () => check(await call(c, '/orders', { method: 'POST', body: { amount, currency, receipt, notes } })));
 }
 
-export async function fetchPayment(paymentId, creds) {
-  const c = creds || (await requireCredentials('razorpay'));
-  return trackCall('razorpay', async () => check(await call(c, `/payments/${encodeURIComponent(paymentId)}`)));
+export async function fetchPayment(paymentId, creds, account = 'razorpay') {
+  const c = creds || (await requireCredentials(account));
+  return trackCall(account, async () => check(await call(c, `/payments/${encodeURIComponent(paymentId)}`)));
 }
 
-export async function refundPayment(paymentId, { amount, speed = 'normal', notes, receipt }, creds) {
-  const c = creds || (await requireCredentials('razorpay'));
+export async function refundPayment(paymentId, { amount, speed = 'normal', notes, receipt }, creds, account = 'razorpay') {
+  const c = creds || (await requireCredentials(account));
   const body = { ...(amount ? { amount } : {}), speed, ...(notes ? { notes } : {}), ...(receipt ? { receipt } : {}) };
-  return trackCall('razorpay', async () => check(await call(c, `/payments/${encodeURIComponent(paymentId)}/refund`, { method: 'POST', body })));
+  return trackCall(account, async () => check(await call(c, `/payments/${encodeURIComponent(paymentId)}/refund`, { method: 'POST', body })));
 }

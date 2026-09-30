@@ -8,6 +8,7 @@ const noteSchema = new mongoose.Schema(
 const schema = new mongoose.Schema(
   {
     phone: { type: String, required: true, unique: true },
+    account: String, // key of the WhatsApp (MSG91) number this customer last wrote to; replies go out from it
     contactId: { type: mongoose.Schema.Types.ObjectId, ref: 'WhatsAppContact' },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', index: true },
     status: { type: String, enum: ['open', 'pending', 'resolved', 'archived'], default: 'open' },

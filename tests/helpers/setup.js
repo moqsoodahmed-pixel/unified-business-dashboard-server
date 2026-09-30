@@ -11,6 +11,7 @@ const { clearHandlers, registerHandler } = await import('../../src/services/even
 const { logActivity } = await import('../../src/services/activity.service.js');
 const { notifyEvent } = await import('../../src/services/telegram/telegram.service.js');
 const { invalidateCredentials } = await import('../../src/services/integration.credentials.js');
+const { invalidateAccounts } = await import('../../src/integrations/accounts.js');
 
 let memory = null;
 
@@ -40,6 +41,7 @@ export async function clearCollections(except = ['users']) {
   const cols = await mongoose.connection.db.listCollections().toArray();
   for (const c of cols) if (!except.includes(c.name)) await mongoose.connection.db.collection(c.name).deleteMany({});
   invalidateCredentials();
+  invalidateAccounts();
 }
 
 export function makeApp() {

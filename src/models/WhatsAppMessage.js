@@ -5,6 +5,7 @@ const schema = new mongoose.Schema(
     conversationId: { type: mongoose.Schema.Types.ObjectId, ref: 'WhatsAppConversation', required: true },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
     phone: { type: String, required: true },
+    account: String, // key of the WhatsApp (MSG91) number that sent / received this message
     direction: { type: String, enum: ['in', 'out'], required: true },
     type: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'template', 'interactive', 'location', 'button', 'reaction', 'contacts', 'other'], default: 'text' },
     text: { type: String, default: '' },

@@ -12,6 +12,7 @@ const schema = new mongoose.Schema(
     notes: mongoose.Schema.Types.Mixed,
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
     paymentId: String, // successful payment
+    account: { type: String, default: 'razorpay' }, // key of the Razorpay account that created the order
     paidAt: Date,
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },

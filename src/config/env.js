@@ -43,8 +43,8 @@ const schema = z.object({
   BREVO2_SENDER_EMAIL: opt,
   BREVO2_SENDER_NAME: opt,
   BREVO2_WEBHOOK_SECRET: opt,
-  // How a send is routed when the sender does not pick an account: auto (least used in the last 24h, with failover) | 1 | 2
-  BREVO_SEND_MODE: z.enum(['auto', '1', '2']).default('auto'),
+  // How a send is routed when the sender does not pick an account: auto (least used in the last 24h, with failover) | 1 | 2 | <account key>
+  BREVO_SEND_MODE: z.string().regex(/^(auto|1|2|brevo2?|brevo_[a-z0-9]{4,16})$/, 'auto, 1, 2 or a Brevo account key').default('auto'),
 
   RAZORPAY_KEY_ID: opt,
   RAZORPAY_KEY_SECRET: opt,

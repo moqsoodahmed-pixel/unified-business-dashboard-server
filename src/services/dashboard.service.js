@@ -1,3 +1,4 @@
+import { typeOf } from '../integrations/registry.js';
 import { Customer, WhatsAppMessage, WhatsAppConversation, Email, Payment, TelegramNotification, WebhookEvent, ActivityLog } from '../models/index.js';
 import { resolveRange, startOfDay, addDays, dayKey, enumerateDays } from '../utils/dates.js';
 import { emailStats } from './brevo/email.service.js';
@@ -102,8 +103,9 @@ export async function getDashboard(query, user) {
       WebhookEvent.find({ receivedAt: { $gte: range.from, $lt: range.to }, status: { $ne: 'rejected' } }).select('provider status receivedAt').limit(SERIES_CAP).lean(),
       TelegramNotification.find({ createdAt: { $gte: range.from, $lt: range.to } }).select('createdAt').limit(SERIES_CAP).lean(),
     ]);
-    const a = bucket(days, hooks, 'receivedAt', () => ({ msg91: 0, brevo: 0, brevo2: 0, razorpay: 0, telegram: 0, failed: 0 }), (r, h) => {
-      r[h.provider] = (r[h.provider] || 0) + 1;
+    const a = bucket(days, hooks, 'receivedAt', () => ({ msg91: 0, brevo: 0, razorpay: 0, telegram: 0, failed: 0 }), (r, h) => {
+      const t = typeOf(h.provider) || h.provider; // all accounts of a type are counted together
+      r[t] = (r[t] || 0) + 1;
       if (h.status === 'failed') r.failed += 1;
     });
     const map = new Map(a.map((r) => [r.date, r]));

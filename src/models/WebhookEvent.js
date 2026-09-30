@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const schema = new mongoose.Schema(
   {
-    provider: { type: String, enum: ['msg91', 'brevo', 'brevo2', 'razorpay'], required: true },
+    provider: { type: String, required: true }, // account key that received the webhook (e.g. brevo, brevo2, brevo_k3f9x2)
     eventId: { type: String, required: true },
     eventType: String,
     payloadHash: String,

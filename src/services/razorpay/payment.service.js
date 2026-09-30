@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
 import { Payment, PaymentOrder, Refund, PaymentEvent, Customer, PAYMENT_STATUS_RANK } from '../../models/index.js';
 import * as client from './razorpay.client.js';
-import { requireCredentials, getRawCredentials } from '../integration.credentials.js';
+import { requireCredentials, getRawCredentials, resolveAccount } from '../integration.credentials.js';
+import { listAccountDefs } from '../../integrations/accounts.js';
 import { getSection } from '../settings.service.js';
 import { findOrCreateCustomer, touchCustomer, displayName } from '../customer.service.js';
 import { emitEvent } from '../event.bus.js';
@@ -69,7 +70,7 @@ async function recordEvent({ eventId, type, paymentId, orderId, refundId, payloa
  *  - domain events fire only on the transition INTO captured / failed, so a replay never re-notifies.
  * Returns { payment, transition: {from, to}, created }.
  */
-export async function applyPaymentEntity(entity, { verifiedByClient = false } = {}) {
+export async function applyPaymentEntity(entity, { verifiedByClient = false, account } = {}) {
   if (!entity?.id) throw new Error('Payment entity has no id');
   const status = mapPaymentStatus(entity);
   const refunded = Number(entity.amount_refunded || 0);
@@ -89,6 +90,7 @@ export async function applyPaymentEntity(entity, { verifiedByClient = false } = 
     errorDescription: entity.error_description || undefined,
     razorpayCreatedAt: fromEpoch(entity.created_at) || new Date(),
     lastEventAt: new Date(),
+    account: account || undefined,
   };
   if (Number.isNaN(fields.amount)) throw new Error('Payment entity has an invalid amount');
 
@@ -250,7 +252,7 @@ const toMinor = (major) => Math.round(Number(major) * 100);
  * everything stored and exchanged with Razorpay is in the smallest unit (paise).
  */
 export async function createOrder(input, user) {
-  const creds = await requireCredentials('razorpay');
+  const { key: account, creds } = await resolveAccount('razorpay', input.account);
   const amount = toMinor(input.amount);
   if (!Number.isFinite(amount) || amount < 100) throw ApiError.badRequest('Amount must be at least 1.00', 'INVALID_AMOUNT');
   const currency = (input.currency || (await getSection('payments')).defaultCurrency || 'INR').toUpperCase();
@@ -269,14 +271,14 @@ export async function createOrder(input, user) {
   if (customer) { notes.customerId = String(customer._id); notes.name = displayName(customer).slice(0, 100); }
   if (input.description) notes.description = String(input.description).slice(0, 250);
 
-  const remote = await client.createOrder({ amount, currency, receipt, notes }, creds);
+  const remote = await client.createOrder({ amount, currency, receipt, notes }, creds, account);
   const order = await PaymentOrder.create({
     orderId: remote.id, amount: remote.amount, currency: remote.currency, receipt: remote.receipt, status: remote.status === 'paid' ? 'paid' : 'created',
-    notes, customerId: customer?._id, createdBy: user.id,
+    notes, customerId: customer?._id, createdBy: user.id, account,
   });
   await emitEvent('PAYMENT_CREATED', {
     customerId: customer?._id, actor: actorOf(user), actorType: 'user', source: 'payment', description: `${user.name} created order ${order.orderId} for ${formatInr({ amount, currency })}`,
-    metadata: { orderId: order.orderId, amount, currency }, data: { customer: customer ? displayName(customer) : undefined, amount, currency, orderId: order.orderId },
+    metadata: { orderId: order.orderId, amount, currency, account }, data: { customer: customer ? displayName(customer) : undefined, amount, currency, orderId: order.orderId },
   });
   return {
     order,
@@ -293,7 +295,10 @@ export async function createOrder(input, user) {
  * then the payment is fetched from Razorpay so the stored status/amount come from the provider, never the browser.
  */
 export async function verifyPayment({ orderId, paymentId, signature }, user) {
-  const creds = await requireCredentials('razorpay');
+  // Use the Razorpay account that created this order (its key secret signed the checkout result).
+  const order = await PaymentOrder.findOne({ orderId });
+  const account = order?.account || 'razorpay';
+  const creds = await requireCredentials(account);
   const expected = hmacSha256Hex(creds.keySecret, `${orderId}|${paymentId}`);
   if (!safeEqual(signature, expected)) {
     await emitEvent('PAYMENT_FAILED', {
@@ -302,12 +307,11 @@ export async function verifyPayment({ orderId, paymentId, signature }, user) {
     });
     throw ApiError.badRequest('Payment signature verification failed', 'INVALID_SIGNATURE');
   }
-  const order = await PaymentOrder.findOne({ orderId });
   if (!order) throw ApiError.notFound('Unknown order', 'ORDER_NOT_FOUND');
-  const remote = await client.fetchPayment(paymentId, creds);
+  const remote = await client.fetchPayment(paymentId, creds, account);
   if (remote.order_id !== orderId) throw ApiError.badRequest('Payment does not belong to this order', 'ORDER_MISMATCH');
   if (Number(remote.amount) !== order.amount) throw ApiError.badRequest('Payment amount does not match the order', 'AMOUNT_MISMATCH');
-  const { payment } = await applyPaymentEntity(remote, { verifiedByClient: true });
+  const { payment } = await applyPaymentEntity(remote, { verifiedByClient: true, account });
   await recordEvent({ type: 'checkout.verified', paymentId, orderId, payload: { status: payment.status } });
   return payment;
 }
@@ -315,7 +319,7 @@ export async function verifyPayment({ orderId, paymentId, signature }, user) {
 /* ------------------------------ webhook ------------------------------ */
 
 /** Process a verified Razorpay webhook payload. Idempotency is enforced by the caller (WebhookEvent). */
-export async function processRazorpayEvent(body) {
+export async function processRazorpayEvent(body, account = 'razorpay') {
   const type = body?.event;
   const eventId = body?.__eventId;
   const p = body?.payload || {};
@@ -326,12 +330,12 @@ export async function processRazorpayEvent(body) {
   if (!type) return { ignored: true, result: 'no event type' };
 
   if (type.startsWith('payment.') && paymentEntity) {
-    const { payment, transition } = await applyPaymentEntity(paymentEntity);
+    const { payment, transition } = await applyPaymentEntity(paymentEntity, { account });
     await recordEvent({ eventId, type, paymentId: payment.paymentId, orderId: payment.orderId, payload: body });
     return { result: `payment ${transition.from ?? 'new'} → ${transition.to}` };
   }
   if (type === 'order.paid') {
-    if (paymentEntity) await applyPaymentEntity(paymentEntity);
+    if (paymentEntity) await applyPaymentEntity(paymentEntity, { account });
     if (orderEntity) {
       await PaymentOrder.updateOne({ orderId: orderEntity.id }, { $set: { status: 'paid', amountPaid: orderEntity.amount_paid, attempts: orderEntity.attempts, paidAt: new Date(), ...(paymentEntity ? { paymentId: paymentEntity.id } : {}) } });
     }
@@ -339,7 +343,7 @@ export async function processRazorpayEvent(body) {
     return { result: 'order paid' };
   }
   if (type.startsWith('refund.') && refundEntity) {
-    if (paymentEntity) await applyPaymentEntity(paymentEntity);
+    if (paymentEntity) await applyPaymentEntity(paymentEntity, { account });
     const { refund } = await applyRefundEntity(refundEntity);
     await recordEvent({ eventId, type, paymentId: refund.paymentId, refundId: refund.refundId, payload: body });
     return { result: `refund ${refund.status}` };
@@ -358,7 +362,10 @@ export async function refundPayment(id, { amount, reason, speed }, user) {
   if (!Number.isFinite(minor) || minor < 100) throw ApiError.badRequest('Refund amount must be at least 1.00', 'INVALID_AMOUNT');
   if (minor > remaining) throw ApiError.badRequest('Refund exceeds the refundable balance', 'REFUND_EXCEEDS_BALANCE', { remaining });
 
-  const remote = await client.refundPayment(payment.paymentId, { amount: minor, speed: speed || 'normal', notes: reason ? { reason: String(reason).slice(0, 200) } : undefined });
+  const order = !payment.account && payment.orderId ? await PaymentOrder.findOne({ orderId: payment.orderId }).select('account').lean() : null;
+  const account = payment.account || order?.account || 'razorpay';
+  const creds = await requireCredentials(account);
+  const remote = await client.refundPayment(payment.paymentId, { amount: minor, speed: speed || 'normal', notes: reason ? { reason: String(reason).slice(0, 200) } : undefined }, creds, account);
   const { refund } = await applyRefundEntity(remote, { createdBy: user.id });
   if (reason) await Refund.updateOne({ _id: refund._id }, { $set: { reason } });
   return { refund: await Refund.findById(refund._id), payment: await Payment.findById(payment._id) };
@@ -446,6 +453,9 @@ export async function paymentStats(from, to) {
 }
 
 export async function razorpayWebhookConfigured() {
-  const { values } = await getRawCredentials('razorpay');
-  return Boolean(values.webhookSecret);
+  for (const { key } of await listAccountDefs('razorpay')) {
+    const { values } = await getRawCredentials(key);
+    if (values.webhookSecret) return true;
+  }
+  return false;
 }

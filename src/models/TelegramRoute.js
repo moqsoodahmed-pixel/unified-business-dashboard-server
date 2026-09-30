@@ -5,6 +5,7 @@ const schema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 80 },
     chatId: { type: String, required: true, trim: true },
+    account: { type: String, default: null }, // key of the Telegram bot that sends to this chat (null = default bot)
     eventTypes: { type: [String], default: [] },
     enabled: { type: Boolean, default: true },
     description: String,

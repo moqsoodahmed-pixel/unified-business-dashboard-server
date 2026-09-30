@@ -21,7 +21,7 @@ export async function getAccount(creds, provider = 'brevo') {
 }
 
 /**
- * `provider` is 'brevo' (account 1) or 'brevo2' (account 2); it decides which stored credentials are used and which
+ * `provider` is the Brevo account key (brevo, brevo2 or brevo_<id>); it decides which stored credentials are used and which
  * Integrations card records the success/failure.
  * POST /v3/smtp/email.  payload: { sender, to, cc, bcc, subject, htmlContent, textContent,
  * templateId, params, attachment:[{name, content(base64)}], replyTo, tags }

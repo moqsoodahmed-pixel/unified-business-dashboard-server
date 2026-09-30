@@ -1,7 +1,8 @@
 import { Email, EmailContact, EmailEvent, EmailTemplate, Customer, EMAIL_STATUS_RANK } from '../../models/index.js';
 import * as client from './brevo.client.js';
-import { requireCredentials, getCredentials, getRawCredentials, isComplete } from '../integration.credentials.js';
-import { PROVIDERS, BREVO_ACCOUNTS } from '../../integrations/registry.js';
+import { requireCredentials, getRawCredentials, isComplete, configuredAccounts } from '../integration.credentials.js';
+import { typeOf } from '../../integrations/registry.js';
+import { getAccountDef, listAccountDefs } from '../../integrations/accounts.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { getSection } from '../settings.service.js';
@@ -66,47 +67,49 @@ export async function deleteTemplate(id) {
   if (!t) throw ApiError.notFound('Template not found');
 }
 
+/** Legacy account choices from the first version ('1' = Account 1, '2' = Account 2) map to the built-in keys. */
+const legacyKey = (choice) => (String(choice) === '1' ? 'brevo' : String(choice) === '2' ? 'brevo2' : choice);
+
 /** Templates stored inside one Brevo account (they are not shared between accounts). */
-export const listRemoteTemplates = (account) => {
-  const key = String(account) === '2' || account === 'brevo2' ? 'brevo2' : 'brevo';
+export const listRemoteTemplates = async (account) => {
+  const key = typeOf(legacyKey(account)) === 'brevo' ? legacyKey(account) : (await configuredAccounts('brevo'))[0]?.key || 'brevo';
   return client.listRemoteTemplates({}, undefined, key);
 };
 
 /* ------------------------------ sending accounts ------------------------------ */
 
-/** The two Brevo sending accounts and whether each one is ready to use. No secrets are returned. */
+/** Every Brevo sending account and whether it is ready to use. No secrets are returned. */
 export async function listAccounts() {
-  return Promise.all(BREVO_ACCOUNTS.map(async (key, i) => {
-    const { values, disabled } = await getRawCredentials(key);
+  const defs = await listAccountDefs('brevo');
+  return Promise.all(defs.map(async (d, i) => {
+    const { values, disabled } = await getRawCredentials(d.key);
     return {
-      key, account: String(i + 1), label: PROVIDERS[key].label,
-      configured: !disabled && isComplete(key, values), senderEmail: values.senderEmail || null,
+      key: d.key, account: d.key, index: i + 1, label: d.label, builtin: d.builtin,
+      configured: !disabled && isComplete(d.key, values), senderEmail: values.senderEmail || null,
     };
   }));
 }
 
 /**
  * Decide which Brevo account(s) to try, in order.
- *  '1' / '2'  -> exactly that account (error if it is not configured)
- *  'auto'     -> every configured account, the one used least in the last 24h first, the other one is the failover
+ *  <account key> (or legacy '1' / '2') -> exactly that account (error if it is not configured)
+ *  'auto'  -> every configured account, least used in the last 24h first; the others are failovers in the same order
  * When the caller does not choose, BREVO_SEND_MODE from the environment applies (default 'auto').
  */
 async function resolveAccounts(choice) {
-  const mode = choice && choice !== 'auto' ? choice : env.BREVO_SEND_MODE;
-  if (mode === '1' || mode === '2') {
-    const key = mode === '1' ? 'brevo' : 'brevo2';
-    return [{ key, label: PROVIDERS[key].label, creds: await requireCredentials(key) }];
+  const mode = legacyKey(choice && choice !== 'auto' ? choice : env.BREVO_SEND_MODE);
+  if (mode && mode !== 'auto') {
+    if (typeOf(mode) !== 'brevo') throw ApiError.badRequest('Unknown Brevo account', 'UNKNOWN_ACCOUNT');
+    const def = await getAccountDef(mode);
+    if (!def) throw ApiError.badRequest('Unknown Brevo account', 'UNKNOWN_ACCOUNT');
+    return [{ key: mode, label: def.label, creds: await requireCredentials(mode) }];
   }
-  const ready = [];
-  for (const key of BREVO_ACCOUNTS) {
-    const creds = await getCredentials(key);
-    if (creds) ready.push({ key, label: PROVIDERS[key].label, creds });
-  }
+  const ready = (await configuredAccounts('brevo')).map((a) => ({ key: a.key, label: a.label, creds: a.creds }));
   if (!ready.length) await requireCredentials('brevo'); // throws the standard "not configured" error
   if (ready.length === 1) return ready;
   const since = new Date(Date.now() - 24 * 3600 * 1000);
   const used = await Promise.all(ready.map((r) => Email.countDocuments({ brevoAccount: r.key, createdAt: { $gte: since }, status: { $ne: 'failed' } })));
-  return used[1] < used[0] ? [ready[1], ready[0]] : ready;
+  return ready.map((r, i) => ({ r, n: used[i], i })).sort((a, b) => a.n - b.n || a.i - b.i).map((x) => x.r);
 }
 
 /* ------------------------------ contacts ------------------------------ */
@@ -375,9 +378,9 @@ export async function getEmail(id) {
 
 export async function emailStats(from, to) {
   const rows = await Email.find({ createdAt: { $gte: from, $lt: to } }).select('status delivered opened clicked bounced brevoAccount').lean();
-  const s = { total: rows.length, sent: 0, delivered: 0, failed: 0, bounced: 0, opened: 0, clicked: 0, byAccount: { brevo: 0, brevo2: 0 } };
+  const s = { total: rows.length, sent: 0, delivered: 0, failed: 0, bounced: 0, opened: 0, clicked: 0, byAccount: {} };
   for (const r of rows) {
-    if (r.brevoAccount && r.status !== 'queued' && r.status !== 'failed') s.byAccount[r.brevoAccount] += 1;
+    if (r.brevoAccount && r.status !== 'queued' && r.status !== 'failed') s.byAccount[r.brevoAccount] = (s.byAccount[r.brevoAccount] || 0) + 1;
     if (r.status !== 'queued' && r.status !== 'failed') s.sent += 1;
     if (r.delivered) s.delivered += 1;
     if (r.status === 'failed' || ['blocked', 'invalid', 'spam'].includes(r.status)) s.failed += 1;

@@ -1,3 +1,4 @@
+import { isType } from '../integrations/registry.js';
 import { Customer, WhatsAppMessage, Email, Payment, WebhookEvent, TelegramNotification } from '../models/index.js';
 import { resolveRange, dayKey, enumerateDays, formatDateTime } from '../utils/dates.js';
 import { toCsv } from '../utils/csv.js';
@@ -113,7 +114,8 @@ const BUILDERS = {
     title: 'Integration report', permission: 'webhooks:read',
     async build(f) {
       const q = { receivedAt: { $gte: f.from, $lt: f.to }, status: { $ne: 'rejected' } };
-      if (f.provider) q.provider = { $in: f.provider };
+      // A type (e.g. brevo) matches every account of that type (brevo, brevo2, brevo_<id>).
+      if (f.provider) q.provider = { $in: f.provider.map((p) => (isType(p) ? new RegExp(`^${p}(2|_[a-z0-9]{4,16})?$`) : p)) };
       if (f.status) q.status = { $in: f.status };
       const [docs, rejected, tg] = await Promise.all([
         WebhookEvent.find(q).select('-payload').sort({ receivedAt: -1 }).limit(ROW_CAP + 1).lean(),

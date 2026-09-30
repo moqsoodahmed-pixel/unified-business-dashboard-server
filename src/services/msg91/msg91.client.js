@@ -36,8 +36,8 @@ export function extractIds(data) {
 const headers = (creds) => ({ authkey: creds.authKey });
 
 /** Template message (usable outside the 24h window). Uses the documented bulk endpoint. */
-export async function sendTemplate({ to, name, language = 'en', namespace, variables = [] }, creds) {
-  const c = creds || (await requireCredentials('msg91'));
+export async function sendTemplate({ to, name, language = 'en', namespace, variables = [] }, creds, account = 'msg91') {
+  const c = creds || (await requireCredentials(account));
   const components = {};
   variables.forEach((v, i) => { components[`body_${i + 1}`] = { type: 'text', value: String(v) }; });
   const body = {
@@ -54,7 +54,7 @@ export async function sendTemplate({ to, name, language = 'en', namespace, varia
       },
     },
   };
-  return trackCall('msg91', async () => {
+  return trackCall(account, async () => {
     const res = await httpJson(`${API}/api/v5/whatsapp/whatsapp-outbound-message/bulk/`, {
       method: 'POST', headers: headers(c), body, provider: P, secrets: [c.authKey],
     });
@@ -64,9 +64,9 @@ export async function sendTemplate({ to, name, language = 'en', namespace, varia
 }
 
 /** Free-form text; only valid inside the customer-service window. */
-export async function sendText({ to, text }, creds) {
-  const c = creds || (await requireCredentials('msg91'));
-  return trackCall('msg91', async () => {
+export async function sendText({ to, text }, creds, account = 'msg91') {
+  const c = creds || (await requireCredentials(account));
+  return trackCall(account, async () => {
     const res = await httpJson(`${API}/api/v5/whatsapp/whatsapp-outbound-message/`, {
       method: 'POST', headers: headers(c), provider: P, secrets: [c.authKey],
       query: { content_type: 'text', integrated_number: c.integratedNumber.replace(/^\+/, ''), recipient_number: to, text },
@@ -77,10 +77,10 @@ export async function sendText({ to, text }, creds) {
 }
 
 /** Media by public URL (image | video | audio | document). */
-export async function sendMedia({ to, type, link, caption, filename }, creds) {
-  const c = creds || (await requireCredentials('msg91'));
+export async function sendMedia({ to, type, link, caption, filename }, creds, account = 'msg91') {
+  const c = creds || (await requireCredentials(account));
   const media = { link, ...(caption ? { caption } : {}), ...(type === 'document' && filename ? { filename } : {}) };
-  return trackCall('msg91', async () => {
+  return trackCall(account, async () => {
     const res = await httpJson(`${API}/api/v5/whatsapp/whatsapp-outbound-message/`, {
       method: 'POST', headers: headers(c), provider: P, secrets: [c.authKey],
       body: { content_type: type, integrated_number: c.integratedNumber.replace(/^\+/, ''), recipient_number: to, [type]: media },

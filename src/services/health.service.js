@@ -4,7 +4,7 @@ import { dbState } from '../config/db.js';
 import { listIntegrations } from './integration.service.js';
 import { WebhookEvent } from '../models/index.js';
 import { getCredentials } from './integration.credentials.js';
-import { PROVIDER_KEYS } from '../integrations/registry.js';
+import { listAccountDefs } from '../integrations/accounts.js';
 import { testers } from '../integrations/testers.js';
 import { recordProviderResult } from './integration.service.js';
 import { logger } from '../config/logger.js';
@@ -30,8 +30,8 @@ export async function getDetailedHealth() {
     pingDb(), listIntegrations(),
     WebhookEvent.countDocuments({ status: 'failed', receivedAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) } }),
   ]);
-  const providers = integrations.filter((i) => ['msg91', 'brevo', 'brevo2', 'razorpay', 'telegram'].includes(i.provider)).map((i) => ({
-    provider: i.provider, label: i.label, status: i.status, configured: i.configured, lastSuccessAt: i.lastSuccessAt, lastErrorAt: i.lastErrorAt, lastError: i.lastError, lastTestedAt: i.lastTestedAt,
+  const providers = integrations.filter((i) => i.type).map((i) => ({
+    provider: i.provider, type: i.type, label: i.label, status: i.status, configured: i.configured, lastSuccessAt: i.lastSuccessAt, lastErrorAt: i.lastErrorAt, lastError: i.lastError, lastTestedAt: i.lastTestedAt,
   }));
   const problems = providers.filter((p) => p.status === 'error').length + (db.ok ? 0 : 1);
   const mem = process.memoryUsage();
@@ -48,11 +48,11 @@ export async function getDetailedHealth() {
 /** Background probe: refreshes provider status by running the read-only tester of each configured provider. */
 export async function probeProviders() {
   const results = {};
-  for (const provider of PROVIDER_KEYS) {
+  for (const { key: provider, type } of await listAccountDefs()) {
     const creds = await getCredentials(provider);
     if (!creds) continue;
     try {
-      await testers[provider](creds);
+      await testers[type](creds, provider);
       await recordProviderResult(provider, true, null, { tested: true });
       results[provider] = 'connected';
     } catch (err) {

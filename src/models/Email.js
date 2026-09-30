@@ -20,7 +20,7 @@ const schema = new mongoose.Schema(
     textContent: String,
     templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'EmailTemplate' },
     brevoTemplateId: Number,
-    brevoAccount: { type: String, enum: ['brevo', 'brevo2'] }, // which Brevo account actually sent it
+    brevoAccount: { type: String, index: true }, // key of the Brevo account that actually sent it
     attachments: [{ name: String, size: Number, _id: false }],
     status: { type: String, enum: Object.keys(EMAIL_STATUS_RANK), default: 'queued' },
     delivered: { type: Boolean, default: false },

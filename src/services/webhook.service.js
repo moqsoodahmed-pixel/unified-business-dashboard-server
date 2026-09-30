@@ -2,6 +2,7 @@ import { WebhookEvent } from '../models/index.js';
 import { ApiError } from '../utils/ApiError.js';
 import { safeEqual, sha256, hmacSha256Hex } from '../utils/crypto.js';
 import { getRawCredentials } from './integration.credentials.js';
+import { typeOf, isType } from '../integrations/registry.js';
 import { emitEvent } from './event.bus.js';
 import { env, isProd } from '../config/env.js';
 import { redactDeep } from '../utils/redact.js';
@@ -23,7 +24,8 @@ function tokenFromRequest(req) {
 
 /** Shared-secret check for providers that don't sign payloads (MSG91, Brevo). */
 export async function verifySharedSecret(provider, req) {
-  const { values } = await getRawCredentials(provider);
+  const { values, missing } = await getRawCredentials(provider);
+  if (missing) throw ApiError.notFound('Unknown webhook endpoint', 'UNKNOWN_ACCOUNT');
   const secret = values.webhookSecret;
   if (!secret) {
     if (env.ALLOW_UNSIGNED_WEBHOOKS && !isProd) return true;
@@ -34,8 +36,9 @@ export async function verifySharedSecret(provider, req) {
 }
 
 /** Razorpay signs the raw body: HMAC-SHA256(rawBody, webhookSecret), hex, header X-Razorpay-Signature. */
-export async function verifyRazorpaySignature(rawBody, signature) {
-  const { values } = await getRawCredentials('razorpay');
+export async function verifyRazorpaySignature(rawBody, signature, account = 'razorpay') {
+  const { values, missing } = await getRawCredentials(account);
+  if (missing) throw ApiError.notFound('Unknown webhook endpoint', 'UNKNOWN_ACCOUNT');
   if (!values.webhookSecret) throw new ApiError(503, 'Razorpay webhook secret is not configured', 'WEBHOOK_SECRET_MISSING');
   const expected = hmacSha256Hex(values.webhookSecret, rawBody);
   if (!safeEqual(signature, expected)) throw ApiError.unauthorized('Invalid webhook signature', 'INVALID_SIGNATURE');
@@ -82,7 +85,7 @@ export async function runWebhook(meta, handler) {
 
   const started = Date.now();
   try {
-    const out = await handler(meta.payload);
+    const out = await handler(meta.payload, meta.provider);
     const ignored = out?.ignored === true;
     await WebhookEvent.updateOne(
       { _id: record._id },
@@ -98,7 +101,7 @@ export async function runWebhook(meta, handler) {
       metadata: { provider: meta.provider, eventId: meta.eventId, eventType: meta.eventType },
       data: { provider: meta.provider, eventType: meta.eventType, error: message },
     });
-    if (meta.provider === 'razorpay') {
+    if (typeOf(meta.provider) === 'razorpay') {
       await emitEvent('PAYMENT_WEBHOOK_FAILED', { source: 'payment', actorType: 'webhook', description: `Razorpay webhook failed: ${message}`, data: { eventType: meta.eventType, eventId: meta.eventId, error: message } });
     }
     err.webhookRecordId = record._id;
@@ -120,7 +123,8 @@ export async function recordRejected({ provider, reason, ip, endpoint, rawBody }
 export async function listWebhookEvents(query = {}) {
   const pg = getPagination(query, { defaultLimit: 30, maxLimit: 100 });
   const filter = {};
-  if (query.provider) filter.provider = query.provider;
+  // A type (e.g. `brevo`) matches every account of that type; an account key matches exactly.
+  if (query.provider) filter.provider = isType(query.provider) && query.all !== 'false' ? { $regex: `^${query.provider}(2|_[a-z0-9]{4,16})?$` } : query.provider;
   if (query.status) filter.status = query.status;
   if (query.eventType) filter.eventType = query.eventType;
   if (query.from || query.to) {
@@ -146,7 +150,7 @@ export async function retryWebhookEvent(id, processors) {
   const e = await WebhookEvent.findById(id);
   if (!e) throw ApiError.notFound('Webhook event not found');
   if (e.status !== 'failed') throw ApiError.conflict('Only failed events can be retried', 'NOT_RETRYABLE');
-  const processor = processors[e.provider];
+  const processor = typeof processors === 'function' ? processors(e.provider) : processors[e.provider];
   if (!processor) throw ApiError.badRequest('No processor for this provider');
   return runWebhook({ provider: e.provider, eventId: e.eventId, eventType: e.eventType, payloadHash: e.payloadHash, payload: e.payload, endpoint: e.endpoint, ip: e.ip }, processor);
 }

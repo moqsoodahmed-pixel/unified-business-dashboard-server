@@ -13,7 +13,7 @@ import { requestLogger } from './middleware/requestLogger.js';
 import { apiLimiter, webhookLimiter } from './middleware/rateLimit.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { asyncHandler } from './utils/asyncHandler.js';
-import { msg91Receiver, brevoReceiver, brevo2Receiver, razorpayReceiver } from './webhooks/receivers.js';
+import { msg91Receiver, brevoReceiver, brevo2Receiver, razorpayReceiver, accountReceiver } from './webhooks/receivers.js';
 import { buildRouter } from './routes/index.js';
 import { buildOpenApi } from './config/openapi.js';
 
@@ -46,6 +46,9 @@ export function createApp() {
   app.post('/api/webhooks/msg91', webhookLimiter, raw, asyncHandler(msg91Receiver));
   app.post('/api/webhooks/brevo', webhookLimiter, raw, asyncHandler(brevoReceiver));
   app.post('/api/webhooks/brevo2', webhookLimiter, raw, asyncHandler(brevo2Receiver));
+  // Accounts added from the Integrations page: /api/webhooks/<type>/<account key>
+  // (only these type prefixes match, so admin routes like /api/webhooks/:id/retry are not captured)
+  app.post('/api/webhooks/:type(msg91|brevo|razorpay)/:account([a-z0-9]+_[a-z0-9]{4,16})', webhookLimiter, raw, asyncHandler(accountReceiver));
   app.post('/api/webhooks/razorpay', webhookLimiter, raw, asyncHandler(razorpayReceiver));
 
   // Email attachments are base64 so this one route accepts a larger body; everything else is capped at 1 MB.
